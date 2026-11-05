@@ -1,19 +1,81 @@
 import csv
 import os
-import tkinter as tk
+import re
+import sys
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont, QImageReader, QKeySequence, QPalette, QPixmap, QShortcut
+from PySide6.QtWidgets import (
+    QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QPushButton, QVBoxLayout, QWidget,
+)
 
 from catalogue import Catalogue
-from sheet import BookSheet, DateDropdown
-
-try:
-    from PIL import Image, ImageOps, ImageTk
-except ImportError:
-    Image = ImageOps = ImageTk = None
+from qt_sheet import BookSheet, DateDropdown, display_date
 
 
-class BookLogger(tk.Tk):
+STYLE = """
+QWidget { font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 13px; color: #24324b; }
+QMainWindow, QDialog { background: #f3f5fb; }
+QLabel#title { font-size: 32px; font-weight: 700; color: #18233c; }
+QLabel#subtitle, QLabel#status { color: #718096; }
+QLabel#badge { background: #e8eaff; color: #4f46e5; border-radius: 12px; padding: 6px 14px; font-weight: 600; }
+QPushButton { background: white; border: 1px solid #dde3ed; border-radius: 8px; padding: 10px 16px; font-weight: 600; }
+QPushButton:hover { background: #eef2ff; border-color: #a5b4fc; }
+QPushButton#primary { background: #4f46e5; color: white; border: none; }
+QPushButton#primary:hover { background: #4338ca; }
+QPushButton#danger { color: #c24154; }
+QLineEdit, QPlainTextEdit { background: white; border: 1px solid #dbe2ef; border-radius: 6px; padding: 8px; selection-background-color: #c7d2fe; }
+QLineEdit:focus, QPlainTextEdit:focus { border: 2px solid #6366f1; }
+QTableWidget { background: white; alternate-background-color: #f8faff; border: 1px solid #e0e6f0; border-radius: 10px; gridline-color: #e6ebf3; selection-background-color: #e5e9ff; selection-color: #24324b; }
+QTableWidget::item { padding: 10px; }
+QTableWidget::item:selected { border: 2px solid #6366f1; }
+QHeaderView::section { background: #edf1f8; color: #64748b; border: none; border-right: 1px solid #e0e6f0; padding: 12px; font-size: 11px; font-weight: 700; }
+QScrollBar:vertical { background: #f3f5fb; width: 12px; }
+QScrollBar:horizontal { background: #f3f5fb; height: 12px; }
+QScrollBar::handle { background: #c3ccdc; border-radius: 5px; min-height: 30px; min-width: 30px; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QComboBox { background: white; color: #24324b; border: 1px solid #dbe2ef; border-radius: 6px; padding: 8px; min-width: 95px; }
+QComboBox QAbstractItemView { background: white; color: #24324b; selection-background-color: #4f46e5; selection-color: white; }
+QCalendarWidget QWidget { background: white; color: #24324b; }
+QCalendarWidget QAbstractItemView { background: white; alternate-background-color: #edf1f8; color: #24324b; selection-background-color: #4f46e5; selection-color: white; }
+"""
+
+DARK_COLORS = {
+    "#24324b": "#e2e8f0", "#f3f5fb": "#111827", "#18233c": "#f1f5f9",
+    "#718096": "#a6b4c8", "#e8eaff": "#303458", "#4f46e5": "#818cf8",
+    "#dde3ed": "#3b475c", "#eef2ff": "#303458", "#a5b4fc": "#a5b4fc",
+    "#4338ca": "#6366f1", "#c24154": "#fda4af", "#dbe2ef": "#3b475c",
+    "#c7d2fe": "#414a7b", "#6366f1": "#a5b4fc", "#f8faff": "#202c40",
+    "#e0e6f0": "#3b475c", "#e6ebf3": "#344156", "#e5e9ff": "#374367",
+    "#edf1f8": "#263247", "#64748b": "#b8c5d8", "#c3ccdc": "#52627c",
+}
+
+
+def theme_palette(dark):
+    palette = QPalette()
+    colors = {
+        QPalette.ColorRole.Window: "#111827" if dark else "#f3f5fb",
+        QPalette.ColorRole.WindowText: "#e2e8f0" if dark else "#24324b",
+        QPalette.ColorRole.Base: "#1b2536" if dark else "#ffffff",
+        QPalette.ColorRole.AlternateBase: "#263247" if dark else "#edf1f8",
+        QPalette.ColorRole.Text: "#e2e8f0" if dark else "#24324b",
+        QPalette.ColorRole.Button: "#263247" if dark else "#ffffff",
+        QPalette.ColorRole.ButtonText: "#e2e8f0" if dark else "#24324b",
+        QPalette.ColorRole.Highlight: "#6366f1" if dark else "#4f46e5",
+        QPalette.ColorRole.HighlightedText: "#ffffff",
+        QPalette.ColorRole.ToolTipBase: "#263247" if dark else "#ffffff",
+        QPalette.ColorRole.ToolTipText: "#e2e8f0" if dark else "#24324b",
+        QPalette.ColorRole.PlaceholderText: "#a6b4c8" if dark else "#64748b",
+    }
+    for role, color in colors.items():
+        palette.setColor(role, QColor(color))
+    for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor("#a6b4c8" if dark else "#64748b"))
+    return palette
+
+
+class BookLogger(QMainWindow):
     def __init__(self, catalogue):
         super().__init__()
         self.catalogue = catalogue
@@ -21,45 +83,85 @@ class BookLogger(tk.Tk):
         self.draft_images = {}
         self.draft_counter = 0
         self.photo_cache = {}
-        self.title("BookLogger • Your reading catalogue")
-        self.geometry("1280x760")
-        self.minsize(850, 500)
-        self.configure(bg="#eef2f6")
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("TFrame", background="#eef2f6")
-        style.configure("TLabel", background="#eef2f6", foreground="#223247", font=("Segoe UI", 10))
-        style.configure("TButton", font=("Segoe UI", 10), padding=(12, 7))
-        style.configure("Title.TLabel", font=("Segoe UI", 24, "bold"))
-        outer = ttk.Frame(self, padding=22)
-        outer.pack(fill="both", expand=True)
-        ttk.Label(outer, text="BookLogger", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="Double-click a cell to edit • Click dates for dropdowns • Tab to move • Ctrl+Enter saves notes").pack(anchor="w", pady=(0, 18))
-        toolbar = ttk.Frame(outer)
-        toolbar.pack(fill="x", pady=(0, 14))
-        ttk.Label(toolbar, text="Search").pack(side="left", padx=(0, 8))
-        self.query = tk.StringVar()
-        ttk.Entry(toolbar, textvariable=self.query, width=25).pack(side="left")
-        for title, command in (("Export CSV", self.export), ("Delete row", self.delete_book),
-                               ("Remove image", self.remove_image), ("Save cell", self.save_book),
-                               ("+ New book row", self.new_book)):
-            ttk.Button(toolbar, text=title, command=command).pack(side="right", padx=3)
+        self.setWindowTitle("BookLogger · Your reading space")
+        self.resize(1380, 820)
+        self.setMinimumSize(950, 560)
+        self.dark_mode = False
+        outer = QWidget()
+        self.setCentralWidget(outer)
+        layout = QVBoxLayout(outer)
+        layout.setContentsMargins(32, 28, 32, 22)
+        layout.setSpacing(18)
+        header = QHBoxLayout()
+        title = QLabel("BookLogger")
+        title.setObjectName("title")
+        header.addWidget(title)
+        header.addStretch()
+        self.badge = QLabel()
+        self.badge.setObjectName("badge")
+        header.addWidget(self.badge)
+        self.theme_button = QPushButton("Dark mode")
+        self.theme_button.setToolTip("Switch between light and dark appearance")
+        self.theme_button.clicked.connect(self.toggle_theme)
+        header.addWidget(self.theme_button)
+        layout.addLayout(header)
+        subtitle = QLabel("Your reading space. One book, one row, every chapter remembered.")
+        subtitle.setObjectName("subtitle")
+        layout.addWidget(subtitle)
+        toolbar = QHBoxLayout()
+        self.query = QLineEdit()
+        self.query.setPlaceholderText("Search books, authors or notes…")
+        self.query.setClearButtonEnabled(True)
+        toolbar.addWidget(self.query, 1)
+        for title, command, name in (("Export CSV", self.export, ""),
+                                      ("Remove cover", self.remove_image, ""),
+                                      ("Delete row", self.delete_book, "danger"),
+                                      ("Save cell", self.save_book, ""),
+                                      ("+ New book", self.new_book, "primary")):
+            button = QPushButton(title)
+            button.setObjectName(name)
+            button.clicked.connect(command)
+            toolbar.addWidget(button)
+        layout.addLayout(toolbar)
         self.sheet = BookSheet(outer, self.edit_cell, self.load_image)
-        self.sheet.pack(fill="both", expand=True)
-        self.status = tk.StringVar()
-        ttk.Label(outer, textvariable=self.status).pack(anchor="w", pady=(14, 0))
-        self.query.trace_add("write", self.search_changed)
-        self.bind("<Control-s>", lambda _: self.save_book())
-        self.bind("<Control-n>", lambda _: self.new_book())
-        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.sheet.new_row_requested.connect(self.new_book)
+        layout.addWidget(self.sheet, 1)
+        hint = QLabel("Double-click to edit  ·  Click dates to select (DD-MM-YYYY)  ·  Tab to move  ·  Ctrl+Enter to save notes  ·  Esc to cancel")
+        hint.setObjectName("subtitle")
+        layout.addWidget(hint)
+        self.status = QLabel()
+        self.status.setObjectName("status")
+        layout.addWidget(self.status)
+        self.query.textChanged.connect(self.search_changed)
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_book)
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.new_book)
+        self.apply_theme()
         self.refresh()
         if not catalogue.books:
             self.new_book()
 
-    def refresh(self):
-        books = self.catalogue.search(self.query.get())
-        self.sheet.set_rows([(book["serial"], book) for book in books] + list(self.drafts.items()))
-        self.status.set(f"{len(books)} / {len(self.catalogue.books)} saved books • {len(self.drafts)} unsaved rows (enter book name and author) • {self.catalogue.directory}")
+    def toggle_theme(self):
+        self.dark_mode = not self.dark_mode
+        self.apply_theme()
+
+    def apply_theme(self):
+        style = STYLE
+        if self.dark_mode:
+            style = re.sub(r"#[0-9a-f]{6}|\bwhite\b", lambda match: "#1b2536" if match.group() == "white" else DARK_COLORS.get(match.group(), match.group()), style)
+            style += "\nQPushButton#primary { color: #111827; }\nQComboBox QAbstractItemView, QCalendarWidget QAbstractItemView { selection-color: #ffffff; }"
+        self.setPalette(theme_palette(self.dark_mode))
+        self.setStyleSheet(style)
+        self.theme_button.setText("Light mode" if self.dark_mode else "Dark mode")
+        self.sheet.dark_mode = self.dark_mode
+        self.refresh()
+        for picker in self.findChildren(DateDropdown):
+            picker.apply_theme(self.dark_mode)
+
+    def refresh(self, selected=None):
+        books = self.catalogue.search(self.query.text())
+        self.sheet.set_rows([(book["serial"], book) for book in books] + list(self.drafts.items()), selected)
+        self.badge.setText(f"{len(self.catalogue.books)} books in your library")
+        self.status.setText(f"{len(books)} shown · {len(self.drafts)} unsaved rows (name and author required) · Saved locally: {self.catalogue.directory}")
 
     def search_changed(self, *_):
         if self.sheet.finish_edit():
@@ -86,7 +188,8 @@ class BookLogger(tk.Tk):
         if field == "serial" or book is None:
             return
         if field in ("start_date", "end_date"):
-            DateDropdown(self, book.get(field, ""), lambda value: self.update_cell(key, field, value))
+            picker = DateDropdown(self, book.get(field, ""), lambda value: self.update_cell(key, field, value))
+            picker.exec()
         elif field == "image":
             self.choose_image(key)
         else:
@@ -102,6 +205,7 @@ class BookLogger(tk.Tk):
         source = image_source or self.draft_images.get(key)
         if field == "image" and not image_source:
             source = None
+        selected = self.sheet.active
         try:
             if draft and not (book["name"] and book["author"]):
                 Catalogue.validate(dict(book, name=book["name"] or "Draft", author=book["author"] or "Draft"))
@@ -116,12 +220,12 @@ class BookLogger(tk.Tk):
                     del self.drafts[key]
                     self.draft_images.pop(key, None)
                     if self.sheet.active and self.sheet.active[0] == key:
-                        self.sheet.active = (saved["serial"], self.sheet.active[1])
+                        selected = (saved["serial"], self.sheet.active[1])
                 self.photo_cache.clear()
         except (OSError, ValueError) as error:
-            messagebox.showerror("Cannot save cell", str(error), parent=self)
+            QMessageBox.warning(self, "Cannot save cell", str(error))
             return False
-        self.refresh()
+        self.refresh(selected)
         return True
 
     def load_image(self, key, book):
@@ -131,24 +235,17 @@ class BookLogger(tk.Tk):
         cache_key = str(path)
         if cache_key in self.photo_cache:
             return self.photo_cache[cache_key]
-        try:
-            if Image is not None:
-                with Image.open(path) as image:
-                    image = ImageOps.exif_transpose(image)
-                    image.thumbnail((100, 64))
-                    photo = ImageTk.PhotoImage(image.copy())
-            else:
-                image = tk.PhotoImage(file=str(path))
-                ratio = max(1, (image.width() + 99) // 100, (image.height() + 63) // 64)
-                photo = image.subsample(ratio, ratio)
-            self.photo_cache[cache_key] = photo
-            return photo
-        except (OSError, ValueError, tk.TclError):
+        reader = QImageReader(str(path))
+        reader.setAutoTransform(True)
+        image = reader.read()
+        if image.isNull():
             return None
+        photo = QPixmap.fromImage(image).scaled(62, 68, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.photo_cache[cache_key] = photo
+        return photo
 
     def choose_image(self, key):
-        path = filedialog.askopenfilename(title="Choose book cover", filetypes=[
-            ("Book images", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"), ("All files", "*.*")])
+        path, _ = QFileDialog.getOpenFileName(self, "Choose book cover", "", "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)")
         if path:
             probe = f"probe-{key}"
             self.draft_images[probe] = path
@@ -157,7 +254,7 @@ class BookLogger(tk.Tk):
             if valid:
                 self.update_cell(key, "image", "", image_source=path)
             else:
-                messagebox.showerror("Cannot open image", "Choose a valid image. JPEG, BMP and WebP require Pillow.", parent=self)
+                QMessageBox.warning(self, "Cannot open image", "Choose a valid image file.")
 
     def remove_image(self):
         if self.sheet.finish_edit() and self.sheet.active:
@@ -171,7 +268,7 @@ class BookLogger(tk.Tk):
         if not self.sheet.finish_edit() or not self.sheet.active:
             return
         key = self.sheet.active[0]
-        if not messagebox.askyesno("Delete row", "Permanently delete this book row?", parent=self):
+        if not self.confirm("Delete row", "Permanently delete this book row?"):
             return
         try:
             if key in self.drafts:
@@ -180,27 +277,31 @@ class BookLogger(tk.Tk):
             else:
                 self.catalogue.delete(key)
         except (OSError, ValueError) as error:
-            messagebox.showerror("Cannot delete book", str(error), parent=self)
+            QMessageBox.warning(self, "Cannot delete book", str(error))
             return
         self.photo_cache.clear()
         self.refresh()
 
-    def close(self):
-        if not self.sheet.finish_edit():
+    def confirm(self, title, text):
+        return QMessageBox.question(self, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                    QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+
+    def closeEvent(self, event):
+        if not self.sheet.finish_edit() or (self.drafts and not self.confirm("Unsaved rows", "Incomplete rows are not saved. Close and discard them?")):
+            event.ignore()
             return
-        if self.drafts and not messagebox.askyesno("Unsaved rows", "Incomplete rows are not saved. Close and discard them?", parent=self):
-            return
-        self.destroy()
+        event.accept()
 
     def export(self):
         if not self.sheet.finish_edit():
             return
-        if self.drafts and not messagebox.askyesno("Unsaved rows", "Export saved books only? Incomplete rows will not be included.", parent=self):
+        if self.drafts and not self.confirm("Unsaved rows", "Export saved books only? Incomplete rows will not be included."):
             return
-        path = filedialog.asksaveasfilename(title="Export entire catalogue", defaultextension=".csv",
-                                          initialfile="books.csv", filetypes=[("CSV file", "*.csv")])
+        path, _ = QFileDialog.getSaveFileName(self, "Export entire catalogue", "books.csv", "CSV files (*.csv)")
         if not path:
             return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
         keys = ("serial", "name", "image", "author", "start_date", "end_date", "notes")
         try:
             with open(path, "w", encoding="utf-8-sig", newline="") as handle:
@@ -208,24 +309,28 @@ class BookLogger(tk.Tk):
                 writer.writerow(("Serial number", "Book name", "Book image", "Author", "Start date", "End date", "Notes"))
                 for book in self.catalogue.books:
                     values = [str(book.get(key, "")) for key in keys]
+                    for index in (4, 5):
+                        values[index] = display_date(values[index])
                     writer.writerow(["'" + value if value.startswith(("=", "+", "-", "@")) else value for value in values])
         except OSError as error:
-            messagebox.showerror("Cannot export", str(error))
+            QMessageBox.warning(self, "Cannot export", str(error))
             return
-        messagebox.showinfo("Export complete", f"Exported {len(self.catalogue.books)} books.")
+        QMessageBox.information(self, "Export complete", f"Exported {len(self.catalogue.books)} books.")
 
 
 def main():
+    application = QApplication(sys.argv)
+    application.setStyle("Fusion")
+    application.setFont(QFont("Segoe UI", 10))
     directory = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BookLogger"
     try:
         catalogue = Catalogue(directory)
     except (OSError, ValueError, KeyError, TypeError) as error:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror("Cannot load catalogue", f"Your saved file could not be read and has not been changed.\n\n{error}\n\nLocation: {directory}")
-        root.destroy()
+        QMessageBox.critical(None, "Cannot load catalogue", f"Your saved file could not be read and has not been changed.\n\n{error}\n\nLocation: {directory}")
         return
-    BookLogger(catalogue).mainloop()
+    window = BookLogger(catalogue)
+    window.show()
+    sys.exit(application.exec())
 
 
 if __name__ == "__main__":
