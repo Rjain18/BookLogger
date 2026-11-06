@@ -100,10 +100,16 @@ class BookLogger(QMainWindow):
         self.badge = QLabel()
         self.badge.setObjectName("badge")
         header.addWidget(self.badge)
-        self.theme_button = QPushButton("Dark mode")
-        self.theme_button.setToolTip("Switch between light and dark appearance")
+        self.theme_button = QPushButton("☾")
+        self.theme_button.setFixedWidth(46)
+        self.theme_button.setAccessibleName("Toggle light and dark mode")
         self.theme_button.clicked.connect(self.toggle_theme)
         header.addWidget(self.theme_button)
+        self.help_info = QLabel("ⓘ")
+        self.help_info.setAccessibleName("Catalogue help")
+        self.help_info.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self.help_info.setToolTip("<b>Quick guide</b><br>Double-click a cell to edit. Enter or Tab saves; Esc cancels.<br>For notes, Enter adds a line and Ctrl+Enter saves.<br>New rows save when both book name and author are filled.<br>Hover over column headings for field-specific help.")
+        header.addWidget(self.help_info)
         layout.addLayout(header)
         subtitle = QLabel("Your reading space. One book, one row, every chapter remembered.")
         subtitle.setObjectName("subtitle")
@@ -112,25 +118,38 @@ class BookLogger(QMainWindow):
         self.query = QLineEdit()
         self.query.setPlaceholderText("Search books, authors or notes…")
         self.query.setClearButtonEnabled(True)
+        self.query.setToolTip("Search saved books by serial number, title, author or notes. Incomplete rows remain visible.")
         toolbar.addWidget(self.query, 1)
-        for title, command, name in (("Export CSV", self.export, ""),
+        for title, command, name in (("Import JSON", self.import_json, ""),
+                                      ("Export JSON", self.export_json, ""),
+                                      ("Export CSV", self.export, ""),
                                       ("Remove cover", self.remove_image, ""),
                                       ("Delete row", self.delete_book, "danger"),
                                       ("Save cell", self.save_book, ""),
                                       ("+ New book", self.new_book, "primary")):
             button = QPushButton(title)
             button.setObjectName(name)
+            button.setToolTip({
+                "Import JSON": "Append books from a JSON backup with new serial numbers. Existing books are preserved; repeated imports add duplicates.",
+                "Export JSON": "Create a portable JSON backup of all saved books with embedded covers and DD-MM-YYYY dates.",
+                "Export CSV": "Export all saved books, including dates in DD-MM-YYYY. Incomplete rows and embedded images are not included.",
+                "Remove cover": "Remove the cover from the selected book row.",
+                "Delete row": "Delete the selected book row after confirmation. Serial numbers are not reused.",
+                "Save cell": "Save the active cell (Ctrl+S). A new row needs both book name and author before it is saved.",
+                "+ New book": "Add a blank book row (Ctrl+N). Fill in the name and author to save it.",
+            }[title])
             button.clicked.connect(command)
             toolbar.addWidget(button)
         layout.addLayout(toolbar)
         self.sheet = BookSheet(outer, self.edit_cell, self.load_image)
         self.sheet.new_row_requested.connect(self.new_book)
         layout.addWidget(self.sheet, 1)
-        hint = QLabel("Double-click to edit  ·  Click dates to select (DD-MM-YYYY)  ·  Tab to move  ·  Ctrl+Enter to save notes  ·  Esc to cancel")
+        hint = QLabel("ⓘ  Double-click to edit  ·  Click dates to select (DD-MM-YYYY)  ·  Tab to move  ·  Ctrl+Enter to save notes  ·  Esc to cancel")
         hint.setObjectName("subtitle")
         layout.addWidget(hint)
         self.status = QLabel()
         self.status.setObjectName("status")
+        self.status.setToolTip("Books and covers are stored locally. Back up books.json together with the images folder. Incomplete rows are not saved.")
         layout.addWidget(self.status)
         self.query.textChanged.connect(self.search_changed)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save_book)
@@ -151,7 +170,8 @@ class BookLogger(QMainWindow):
             style += "\nQPushButton#primary { color: #111827; }\nQComboBox QAbstractItemView, QCalendarWidget QAbstractItemView { selection-color: #ffffff; }"
         self.setPalette(theme_palette(self.dark_mode))
         self.setStyleSheet(style)
-        self.theme_button.setText("Light mode" if self.dark_mode else "Dark mode")
+        self.theme_button.setText("☀" if self.dark_mode else "☾")
+        self.theme_button.setToolTip("Switch to light mode" if self.dark_mode else "Switch to dark mode")
         self.sheet.dark_mode = self.dark_mode
         self.refresh()
         for picker in self.findChildren(DateDropdown):
@@ -245,7 +265,7 @@ class BookLogger(QMainWindow):
         return photo
 
     def choose_image(self, key):
-        path, _ = QFileDialog.getOpenFileName(self, "Choose book cover", "", "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)")
+        path, _ = QFileDialog.getOpenFileName(self, "Choose book cover", "", "Images (*.png *.jpg *.jpeg *.JPG *.JPEG *.gif *.bmp *.webp);;JPEG images (*.jpg *.jpeg *.JPG *.JPEG);;All files (*)")
         if path:
             probe = f"probe-{key}"
             self.draft_images[probe] = path
@@ -291,6 +311,41 @@ class BookLogger(QMainWindow):
             event.ignore()
             return
         event.accept()
+
+    def import_json(self):
+        if not self.sheet.finish_edit():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Import JSON backup", "", "JSON files (*.json)")
+        if not path:
+            return
+        if not self.confirm("Import books", "Append books from this JSON file with new serial numbers? Existing books are preserved. Importing the same file again adds duplicates."):
+            return
+        try:
+            count = self.catalogue.import_json(path)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Cannot import JSON", str(error))
+            return
+        self.photo_cache.clear()
+        self.query.clear()
+        self.refresh()
+        QMessageBox.information(self, "Import complete", f"Imported {count} books. Existing books were preserved.")
+
+    def export_json(self):
+        if not self.sheet.finish_edit():
+            return
+        if self.drafts and not self.confirm("Unsaved rows", "Export saved books only? Incomplete rows will not be included."):
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export JSON backup", "books-backup.json", "JSON files (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            self.catalogue.export_json(path)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Cannot export JSON", str(error))
+            return
+        QMessageBox.information(self, "Export complete", f"Exported {len(self.catalogue.books)} books with covers.")
 
     def export(self):
         if not self.sheet.finish_edit():

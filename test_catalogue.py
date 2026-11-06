@@ -65,6 +65,48 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(self.catalogue.next_serial, 2)
         self.assertEqual(list(self.directory.glob("*.tmp")), [])
 
+    def test_json_round_trip_appends_and_embeds_cover(self):
+        import json
+        source = self.directory / "cover.jpeg"
+        source.write_bytes(b"cover contents")
+        self.catalogue.save(self.fields, image_source=source)
+        backup = self.directory / "backup.json"
+        self.catalogue.export_json(backup)
+        data = json.loads(backup.read_text(encoding="utf-8"))
+        self.assertEqual(data["books"][0]["start_date"], "01-01-2026")
+        self.assertIn("image_data", data["books"][0])
+        self.assertEqual(self.catalogue.import_json(backup), 1)
+        self.assertEqual([book["serial"] for book in self.catalogue.books], [1, 2])
+        self.assertEqual(self.catalogue.books[1]["start_date"], "2026-01-01")
+        self.assertEqual(self.catalogue.image_path(self.catalogue.books[1]).read_bytes(), b"cover contents")
+
+    def test_json_invalid_batch_and_failed_write_are_atomic(self):
+        import json
+        backup = self.directory / "backup.json"
+        self.catalogue.save(self.fields)
+        before = self.catalogue.path.read_bytes()
+        for entry in (dict(self.fields, name=""), dict(self.fields, notes=123),
+                      dict(self.fields, image="../../secret.jpg"),
+                      dict(self.fields, image_data="!!!", image_extension=".jpg")):
+            backup.write_text(json.dumps({"books": [self.fields, entry]}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                self.catalogue.import_json(backup)
+            self.assertEqual(self.catalogue.path.read_bytes(), before)
+        backup.write_text(json.dumps({"books": [dict(self.fields, image_data="aW1hZ2U=", image_extension=".jpg")]}), encoding="utf-8")
+        with patch("catalogue.os.replace", side_effect=OSError("disk error")):
+            with self.assertRaises(OSError):
+                self.catalogue.import_json(backup)
+        self.assertEqual(self.catalogue.path.read_bytes(), before)
+        self.assertEqual(list((self.directory / "images").iterdir()), [])
+        self.assertEqual(self.catalogue.next_serial, 2)
+
+    def test_json_export_rejects_live_catalogue_path(self):
+        self.catalogue.save(self.fields)
+        before = self.catalogue.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.catalogue.export_json(self.catalogue.path)
+        self.assertEqual(self.catalogue.path.read_bytes(), before)
+
     def test_corrupt_file_is_not_overwritten(self):
         self.catalogue.path.write_text("invalid json", encoding="utf-8")
         with self.assertRaises(ValueError):

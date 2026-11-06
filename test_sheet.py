@@ -150,7 +150,7 @@ class SheetTests(unittest.TestCase):
         self.app.sheet.editor.setText("Unsaved title")
         self.app.theme_button.click()
         self.assertTrue(self.app.dark_mode)
-        self.assertEqual(self.app.theme_button.text(), "Light mode")
+        self.assertEqual(self.app.theme_button.text(), "☀")
         self.assertEqual(self.app.sheet.editor.text(), "Unsaved title")
         self.assertEqual(self.app.sheet.item(0, 1).background().color().name(), "#3b3325")
         self.assertEqual(self.app.sheet.item(len(self.app.sheet.rows), 1).foreground().color().name(), "#c7d2fe")
@@ -177,6 +177,44 @@ class SheetTests(unittest.TestCase):
             self.assertFalse(picker.calendar.isDateEditEnabled())
             self.assertEqual(picker.label.text(), "06-11-2026")
         picker.deleteLater()
+
+    def test_symbols_and_contextual_help(self):
+        self.assertEqual(self.app.theme_button.text(), "☾")
+        self.assertEqual(self.app.help_info.text(), "ⓘ")
+        self.assertIn("Quick guide", self.app.help_info.toolTip())
+        for column in range(self.app.sheet.columnCount()):
+            header = self.app.sheet.horizontalHeaderItem(column)
+            self.assertIn("ⓘ", header.text())
+            self.assertTrue(header.toolTip())
+        self.assertIn("Ctrl+Enter", self.app.sheet.horizontalHeaderItem(6).toolTip())
+        self.assertTrue(self.app.query.toolTip())
+        picker = DateDropdown(self.app, "", lambda _: True)
+        self.assertEqual(picker.help_info.text(), "ⓘ")
+        self.assertIn("DD-MM-YYYY", picker.help_info.toolTip())
+        self.assertTrue(picker.month.toolTip())
+        self.assertTrue(picker.year.toolTip())
+        self.app.toggle_theme()
+        self.assertEqual(self.app.theme_button.text(), "☀")
+        self.assertEqual(self.app.theme_button.toolTip(), "Switch to light mode")
+        picker.deleteLater()
+
+    def test_jpeg_cover_selection_and_json_actions(self):
+        serial = self.create_book()
+        for extension in (".jpg", ".jpeg", ".JPEG"):
+            path = Path(self.temporary.name) / ("cover" + extension)
+            image = QImage(20, 30, QImage.Format.Format_RGB32)
+            image.fill(Qt.GlobalColor.red)
+            self.assertTrue(image.save(str(path), "JPEG"))
+            with patch("app.QFileDialog.getOpenFileName", return_value=(str(path), "")):
+                self.app.choose_image(serial)
+            self.assertIsNotNone(self.app.load_image(serial, self.catalogue.books[0]))
+        backup = Path(self.temporary.name) / "backup.json"
+        with patch("app.QFileDialog.getSaveFileName", return_value=(str(backup), "")), patch("app.QMessageBox.information"):
+            self.app.export_json()
+        with patch("app.QFileDialog.getOpenFileName", return_value=(str(backup), "")), patch.object(self.app, "confirm", return_value=True), patch("app.QMessageBox.information"):
+            self.app.import_json()
+        self.assertEqual(len(self.catalogue.books), 2)
+        self.assertIsNotNone(self.app.load_image(2, self.catalogue.books[1]))
 
     def test_clear_date_and_reject_invalid_selection(self):
         serial = self.create_book()

@@ -21,7 +21,15 @@ class DateDropdown(QDialog):
         self.apply = apply
         layout = QVBoxLayout(self)
         self.label = QLabel()
-        layout.addWidget(self.label)
+        heading = QHBoxLayout()
+        heading.addWidget(self.label)
+        heading.addStretch()
+        self.help_info = QLabel("ⓘ")
+        self.help_info.setAccessibleName("Date selection help")
+        self.help_info.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self.help_info.setToolTip("Choose a month and year, then click a day and Apply date.<br>Dates display as DD-MM-YYYY and cannot be typed.<br>An end date requires a start date and cannot be earlier.<br>Clear date removes the value; Cancel keeps it unchanged.")
+        heading.addWidget(self.help_info)
+        layout.addLayout(heading)
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
         self.calendar.setDateEditEnabled(False)
@@ -30,10 +38,13 @@ class DateDropdown(QDialog):
         self.calendar.setSelectedDate(initial)
         self.calendar.setNavigationBarVisible(False)
         navigation = QHBoxLayout()
+        self.calendar.setToolTip("Click a day to select it. Apply date saves it; double-clicking a day also applies it.")
         self.month = QComboBox()
+        self.month.setToolTip("Choose the month to browse. Then select a day in the calendar.")
         self.month.addItems([QDate(2000, month, 1).toString("MMMM") for month in range(1, 13)])
         self.month.setCurrentIndex(initial.month() - 1)
         self.year = QComboBox()
+        self.year.setToolTip("Choose the year to browse. Then select a day in the calendar.")
         self.year.addItems([str(year) for year in range(min(1900, initial.year()), max(2100, initial.year()) + 1)])
         self.year.setCurrentText(str(initial.year()))
         navigation.addWidget(self.month)
@@ -49,6 +60,7 @@ class DateDropdown(QDialog):
         for title, callback in (("Clear date", lambda: self.submit("")),
                                 ("Cancel", self.reject), ("Apply date", lambda: self.submit())):
             button = QPushButton(title)
+            button.setToolTip({"Clear date": "Remove this date from the book.", "Cancel": "Close without changing the date.", "Apply date": "Save the selected day to this book."}[title])
             button.clicked.connect(callback)
             actions.addWidget(button)
         layout.addLayout(actions)
@@ -99,7 +111,16 @@ class DateDropdown(QDialog):
 
 class BookSheet(QTableWidget):
     columns = ("serial", "name", "image", "author", "start_date", "end_date", "notes")
-    headings = ("#", "BOOK NAME", "COVER", "AUTHOR", "START DATE ▾", "END DATE ▾", "NOTES")
+    headings = ("# ⓘ", "BOOK NAME ⓘ", "COVER ⓘ", "AUTHOR ⓘ", "START DATE ▾ ⓘ", "END DATE ▾ ⓘ", "NOTES ⓘ")
+    help_text = (
+        "Automatic serial number. Read-only and never reused after deletion.",
+        "Double-click to enter the book title. Required, together with author, to save a new row.",
+        "Double-click to choose or replace the book cover. Use Remove cover to clear it.",
+        "Double-click to enter the author. Required, together with book name, to save a new row.",
+        "Click to select a start date. Optional; displayed as DD-MM-YYYY. Typing is disabled.",
+        "Click to select an end date. Requires a start date and cannot be earlier. Displayed as DD-MM-YYYY.",
+        "Double-click to edit notes. Enter adds a new line; Ctrl+Enter or Tab saves; Esc cancels.",
+    )
     widths = (65, 250, 110, 200, 150, 150, 300)
     new_row_requested = Signal()
 
@@ -114,6 +135,8 @@ class BookSheet(QTableWidget):
         self.on_commit = None
         self.setColumnCount(len(self.columns))
         self.setHorizontalHeaderLabels(self.headings)
+        for column, text in enumerate(self.help_text):
+            self.horizontalHeaderItem(column).setToolTip(text)
         self.setAlternatingRowColors(True)
         self.setShowGrid(True)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -171,6 +194,7 @@ class BookSheet(QTableWidget):
                 self.setItem(row, column, item)
         for column in range(len(self.columns)):
             item = QTableWidgetItem("+ Add a new book" if column == 1 else "")
+            item.setToolTip("Click to add a blank book row. Fill in book name and author to save it.")
             item.setForeground(QColor("#c7d2fe" if self.dark_mode else "#4f46e5"))
             item.setBackground(QColor("#303458" if self.dark_mode else "#eef2ff"))
             item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
