@@ -26,6 +26,7 @@ class SheetTests(unittest.TestCase):
         self.catalogue = Catalogue(self.temporary.name)
         self.app = BookLogger(self.catalogue)
         self.addCleanup(self.app.deleteLater)
+        self.addCleanup(self.app.settings_timer.stop)
         self.app.show()
         self.application.processEvents()
         self.app.sheet.cancel_edit()
@@ -33,8 +34,135 @@ class SheetTests(unittest.TestCase):
 
     def create_book(self):
         self.assertTrue(self.app.update_cell(self.key, "name", "Test book"))
-        self.assertTrue(self.app.update_cell(self.key, "author", "Test author"))
+        self.assertTrue(self.app.update_cell(self.catalogue.books[0]["serial"], "author", "Test author"))
         return self.catalogue.books[0]["serial"]
+
+    def test_animated_stars_and_persistence(self):
+        from PySide6.QtCore import QPoint
+        from star_rating import StarRating
+        self.create_book()
+        column = self.app.sheet.columns.index("rating")
+        widget = self.app.sheet.cellWidget(0, column)
+        self.assertIsInstance(widget, StarRating)
+        left, top, size = widget.star_bounds()
+        position = QPoint(round(left + size * 3.25), round(top + size / 2))
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+        event = QMouseEvent(QEvent.Type.MouseMove, QPointF(position), QPointF(position), Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(widget, event)
+        QTest.qWait(160)
+        self.assertAlmostEqual(widget.fill, 3.5)
+        self.assertEqual(self.catalogue.books[0]["rating"], "")
+        QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=position)
+        self.assertEqual(Catalogue(self.temporary.name).books[0]["rating"], 3.5)
+        widget = self.app.sheet.cellWidget(0, column)
+        QTest.keyClick(widget, Qt.Key.Key_Delete)
+        self.assertEqual(self.catalogue.books[0]["rating"], "")
+
+    def test_gui_settings_persist_column_order_width_and_theme(self):
+        self.create_book()
+        header = self.app.sheet.horizontalHeader()
+        header.moveSection(header.visualIndex(2), 0)
+        self.app.sheet.setColumnWidth(2, 240)
+        self.app.toggle_theme()
+        self.app.resize(950, 700)
+        self.app.save_gui_settings()
+        restored = BookLogger(Catalogue(self.temporary.name))
+        try:
+            self.assertTrue(restored.dark_mode)
+            self.assertEqual(restored.sheet.horizontalHeader().visualIndex(2), 0)
+            self.assertEqual(restored.sheet.columnWidth(2), 240)
+            self.assertEqual(restored.size(), self.app.size())
+            self.assertEqual(restored.sheet.columns[2], "image")
+        finally:
+            restored.settings_timer.stop()
+            restored.deleteLater()
+
+    def test_cover_delegate_and_context_menu(self):
+        from qt_sheet import CoverDelegate
+        serial = self.create_book()
+        column = self.app.sheet.columns.index("image")
+        path = Path(self.temporary.name) / "cover.jpeg"
+        image = QImage(400, 60, QImage.Format.Format_RGB32)
+        image.fill(Qt.GlobalColor.cyan)
+        image.save(str(path), "JPEG")
+        self.app.update_cell(serial, "image", "", image_source=str(path))
+        self.assertIsInstance(self.app.sheet.itemDelegateForColumn(column), CoverDelegate)
+        self.assertEqual(self.app.sheet.item(0, column).text(), "")
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QColor, QPainter, QPixmap
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        canvas = QPixmap(180, 120)
+        canvas.fill(QColor("#ff00ff"))
+        painter = QPainter(canvas)
+        option = QStyleOptionViewItem()
+        option.rect = QRect(20, 20, 110, 84)
+        option.widget = self.app.sheet
+        option.decorationSize = self.app.sheet.iconSize()
+        delegate = self.app.sheet.itemDelegateForColumn(column)
+        delegate.paint(painter, option, self.app.sheet.model().index(0, column))
+        painter.end()
+        rendered = canvas.toImage()
+        self.assertEqual(rendered.pixelColor(10, 10).name(), "#ff00ff")
+        painted = [(x, y) for y in range(120) for x in range(180) if rendered.pixelColor(x, y).name() != "#ff00ff"]
+        self.assertTrue(painted)
+        self.assertTrue(all(option.rect.contains(x, y) for x, y in painted))
+        menu = self.app.sheet.create_cover_menu(serial)
+        with patch("app.QFileDialog.getOpenFileName", return_value=("", "")) as choose:
+            menu.actions()[0].trigger()
+            choose.assert_called_once()
+        self.assertTrue(menu.actions()[1].isEnabled())
+        menu.actions()[1].trigger()
+        self.assertEqual(Catalogue(self.temporary.name).books[0]["image"], "")
+        menu.deleteLater()
+
+    def test_export_menu_contrast(self):
+        from PySide6.QtGui import QPalette
+        for dark in (False, True):
+            if self.app.dark_mode != dark:
+                self.app.toggle_theme()
+            self.app.export_menu.ensurePolished()
+            self.assertIn("QMenu::item:selected", self.app.styleSheet())
+            self.assertEqual(self.app.export_menu.palette().color(QPalette.ColorRole.WindowText).name(), "#e2e8f0" if dark else "#24324b")
+
+    def test_heading_minimum_widths(self):
+        header = self.app.sheet.horizontalHeader()
+        self.assertEqual(self.app.sheet.horizontalHeaderItem(0).text(), "Sr. No, ⓘ")
+        for dark in (False, True):
+            if dark != self.app.dark_mode:
+                self.app.toggle_theme()
+            for column in range(self.app.sheet.columnCount()):
+                self.app.sheet.setColumnWidth(column, 10)
+                self.application.processEvents()
+                self.assertGreaterEqual(self.app.sheet.columnWidth(column), header.sectionSizeHint(column))
+                self.app.sheet.setColumnWidth(column, 400)
+                self.assertGreaterEqual(self.app.sheet.columnWidth(column), 400)
+
+    def test_any_cell_saves_partial_row_and_exports(self):
+        self.assertTrue(self.app.update_cell(self.key, "notes", "First detail"))
+        self.assertFalse(self.app.drafts)
+        restored = Catalogue(self.temporary.name)
+        self.assertEqual(restored.books[0]["name"], "")
+        self.assertEqual(restored.books[0]["notes"], "First detail")
+        backup = Path(self.temporary.name) / "partial.json"
+        restored.export_json(backup)
+        imported = Catalogue(Path(self.temporary.name) / "imported")
+        imported.import_json(backup)
+        self.assertEqual(imported.books[0]["notes"], "First detail")
+
+    def test_focus_loss_autosaves_and_toolbar_is_compact(self):
+        from PySide6.QtWidgets import QPushButton
+        self.app.edit_cell(self.key, 1)
+        self.app.sheet.editor.setText("Auto saved")
+        self.app.query.setFocus()
+        self.application.processEvents()
+        self.application.processEvents()
+        self.assertIsNone(self.app.sheet.editor)
+        self.assertEqual(Catalogue(self.temporary.name).books[0]["name"], "Auto saved")
+        texts = [button.text() for button in self.app.findChildren(QPushButton)]
+        for removed in ("Save cell", "Remove cover", "Export JSON", "Export CSV"):
+            self.assertNotIn(removed, texts)
+        self.assertEqual(len(self.app.export_menu.actions()), 2)
 
     def test_new_row_and_persistence(self):
         self.assertEqual(len(self.app.sheet.rows), 1)
@@ -60,9 +188,9 @@ class SheetTests(unittest.TestCase):
 
     def test_invalid_edit_keeps_editor_and_saved_value(self):
         serial = self.create_book()
-        self.app.edit_cell(serial, 3)
-        self.app.sheet.editor.clear()
-        with patch("app.QMessageBox.warning"):
+        self.app.edit_cell(serial, 1)
+        self.app.sheet.editor.setText("Cannot save")
+        with patch("app.QMessageBox.warning"), patch.object(self.catalogue, "save", side_effect=OSError("disk full")):
             self.assertFalse(self.app.sheet.finish_edit())
         self.assertIsNotNone(self.app.sheet.editor)
         self.assertEqual(self.catalogue.books[0]["author"], "Test author")
@@ -98,8 +226,8 @@ class SheetTests(unittest.TestCase):
         image.fill(Qt.GlobalColor.blue)
         self.assertTrue(image.save(str(path)))
         self.assertTrue(self.app.update_cell(self.key, "image", "", image_source=str(path)))
-        self.create_book()
         self.assertTrue(self.catalogue.image_path(self.catalogue.books[0]).exists())
+        self.assertEqual(self.catalogue.books[0]["name"], "")
 
     def test_notes_search_export_and_delete(self):
         serial = self.create_book()

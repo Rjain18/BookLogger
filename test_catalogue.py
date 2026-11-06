@@ -34,7 +34,7 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(self.catalogue.save(self.fields)["serial"], 2)
 
     def test_invalid_fields(self):
-        for fields in (dict(self.fields, name=" "), dict(self.fields, author=""),
+        for fields in (dict(self.fields, name=123),
                        dict(self.fields, start_date="2026-02-30"),
                        dict(self.fields, start_date="20260101"),
                        dict(self.fields, end_date="2025-12-31"),
@@ -42,6 +42,18 @@ class CatalogueTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 self.catalogue.save(fields)
         self.assertEqual(self.catalogue.books, [])
+
+    def test_ratings_validation_and_json_round_trip(self):
+        for rating in (1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5):
+            self.catalogue.save(dict(self.fields, rating=rating))
+        for rating in (0, 0.5, 5.5, 3.2, True, float("nan"), float("inf"), "bad"):
+            with self.subTest(rating=rating), self.assertRaises(ValueError):
+                self.catalogue.save(dict(self.fields, rating=rating))
+        backup = self.directory / "ratings.json"
+        self.catalogue.export_json(backup)
+        restored = Catalogue(self.directory / "restored")
+        restored.import_json(backup)
+        self.assertEqual([book["rating"] for book in restored.books], [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5])
 
     def test_optional_dates(self):
         self.catalogue.save(dict(self.fields, start_date="", end_date=""))
@@ -85,7 +97,7 @@ class CatalogueTests(unittest.TestCase):
         backup = self.directory / "backup.json"
         self.catalogue.save(self.fields)
         before = self.catalogue.path.read_bytes()
-        for entry in (dict(self.fields, name=""), dict(self.fields, notes=123),
+        for entry in (dict(self.fields, name=123), dict(self.fields, notes=123),
                       dict(self.fields, image="../../secret.jpg"),
                       dict(self.fields, image_data="!!!", image_extension=".jpg")):
             backup.write_text(json.dumps({"books": [self.fields, entry]}), encoding="utf-8")

@@ -1,12 +1,37 @@
 from datetime import date
+from math import cos, sin, pi
 
-from PySide6.QtCore import QDate, QEvent, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QTextCharFormat
+from PySide6.QtCore import QDate, QEvent, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF, QTextCharFormat
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCalendarWidget, QComboBox, QDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTableWidget,
+    QApplication, QAbstractItemView, QCalendarWidget, QComboBox, QDialog, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
     QTableWidgetItem, QVBoxLayout,
 )
+
+
+from star_rating import StarRating
+
+
+class CoverDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        base = QStyleOptionViewItem(option)
+        self.initStyleOption(base, index)
+        icon = index.data(Qt.ItemDataRole.DecorationRole) or QIcon()
+        if icon.isNull():
+            super().paint(painter, option, index)
+            return
+        base.icon = QIcon()
+        base.text = ""
+        style = option.widget.style() if option.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, base, painter, option.widget)
+        bounds = option.rect.adjusted(10, 8, -10, -8)
+        size = QSize(min(62, bounds.width()), min(68, bounds.height()))
+        pixmap = icon.pixmap(size)
+        painter.save()
+        painter.setClipRect(bounds)
+        painter.drawPixmap(bounds.center().x() - pixmap.width() // 2, bounds.center().y() - pixmap.height() // 2, pixmap)
+        painter.restore()
 
 
 def display_date(value):
@@ -109,20 +134,44 @@ class DateDropdown(QDialog):
         return False
 
 
+def rating_stars(value):
+    pixmap = QPixmap(100, 20)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    for star in range(5):
+        points = QPolygonF([QPointF(star * 20 + 10 + (9 if point % 2 == 0 else 4) * cos(-pi / 2 + point * pi / 5),
+                                   10 + (9 if point % 2 == 0 else 4) * sin(-pi / 2 + point * pi / 5)) for point in range(10)])
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#94a3b8"))
+        painter.drawPolygon(points)
+        painter.save()
+        painter.setClipRect(star * 20, 0, round(20 * max(0, min(1, float(value) - star))), 20)
+        painter.setBrush(QColor("#f59e0b"))
+        painter.drawPolygon(points)
+        painter.restore()
+    painter.end()
+    return pixmap
+
+
 class BookSheet(QTableWidget):
-    columns = ("serial", "name", "image", "author", "start_date", "end_date", "notes")
-    headings = ("# ⓘ", "BOOK NAME ⓘ", "COVER ⓘ", "AUTHOR ⓘ", "START DATE ▾ ⓘ", "END DATE ▾ ⓘ", "NOTES ⓘ")
+    columns = ("serial", "name", "image", "author", "start_date", "end_date", "notes", "rating")
+    headings = ("Sr. No, ⓘ", "BOOK NAME ⓘ", "COVER ⓘ", "AUTHOR ⓘ", "START DATE ▾ ⓘ", "END DATE ▾ ⓘ", "NOTES ⓘ", "RATING ★ ⓘ")
     help_text = (
         "Automatic serial number. Read-only and never reused after deletion.",
-        "Double-click to enter the book title. Required, together with author, to save a new row.",
-        "Double-click to choose or replace the book cover. Use Remove cover to clear it.",
-        "Double-click to enter the author. Required, together with book name, to save a new row.",
+        "Double-click to enter the book title. Automatically saved when you leave the cell; other fields may be filled later.",
+        "Double-click to choose a cover. Right-click this cell to change or remove the cover.",
+        "Double-click to enter the author. Automatically saved when you leave the cell; other fields may be filled later.",
         "Click to select a start date. Optional; displayed as DD-MM-YYYY. Typing is disabled.",
         "Click to select an end date. Requires a start date and cannot be earlier. Displayed as DD-MM-YYYY.",
         "Double-click to edit notes. Enter adds a new line; Ctrl+Enter or Tab saves; Esc cancels.",
+        "Hover over stars to preview; click to save 1–5 in steps of 0.5. Delete clears; arrow keys adjust the rating.",
     )
-    widths = (65, 250, 110, 200, 150, 150, 300)
+    widths = (110, 250, 110, 200, 170, 170, 300, 180)
     new_row_requested = Signal()
+    cover_change_requested = Signal(object)
+    cover_remove_requested = Signal(object)
+    rating_changed = Signal(object, str)
 
     def __init__(self, parent, edit, image_loader):
         super().__init__(parent)
@@ -148,13 +197,52 @@ class BookSheet(QTableWidget):
         self.verticalHeader().setDefaultSectionSize(84)
         self.horizontalHeader().setMinimumHeight(46)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.horizontalHeader().setStretchLastSection(True)
+        self.horizontalHeader().setStretchLastSection(False)
+        self.horizontalHeader().setSectionsMovable(True)
+        self.horizontalHeader().setFirstSectionMovable(True)
+        self.horizontalHeader().setToolTip("Drag headings to reorder columns; drag their edges to resize. Layout is saved automatically.")
+        self.setItemDelegateForColumn(self.columns.index("image"), CoverDelegate(self))
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_cover_menu)
         for column, width in enumerate(self.widths):
             self.setColumnWidth(column, width)
+        self.horizontalHeader().sectionResized.connect(self.enforce_heading_width)
+        self.horizontalHeader().sectionResized.connect(self.position_editor)
+        self.horizontalHeader().sectionMoved.connect(self.position_editor)
+        self.enforce_heading_width()
         self.cellClicked.connect(self.clicked_cell)
         self.cellDoubleClicked.connect(self.double_clicked_cell)
         self.horizontalScrollBar().valueChanged.connect(self.position_editor)
         self.verticalScrollBar().valueChanged.connect(self.position_editor)
+
+    def create_cover_menu(self, key):
+        menu = QMenu(self)
+        menu.addAction("Change cover…", lambda: self.cover_change_requested.emit(key))
+        remove = menu.addAction("Remove cover", lambda: self.cover_remove_requested.emit(key))
+        book = next((book for row_key, book in self.rows if row_key == key), {})
+        remove.setEnabled(bool(book.get("image")))
+        return menu
+
+    def show_cover_menu(self, point):
+        item = self.itemAt(point)
+        if item is None or item.row() >= len(self.rows) or item.column() != self.columns.index("image"):
+            return
+        key = self.rows[item.row()][0]
+        if not self.finish_edit():
+            return
+        self.select(key, item.column())
+        menu = self.create_cover_menu(key)
+        menu.exec(self.viewport().mapToGlobal(point))
+        menu.deleteLater()
+
+    def enforce_heading_width(self, *_):
+        header = self.horizontalHeader()
+        for column in range(self.columnCount()):
+            minimum = header.sectionSizeHint(column)
+            if column == self.columns.index("rating"):
+                minimum = max(minimum, 180)
+            if self.columnWidth(column) < minimum:
+                self.setColumnWidth(column, minimum)
 
     @property
     def active(self):
@@ -169,6 +257,8 @@ class BookSheet(QTableWidget):
         self.setRowCount(len(rows) + 1)
         for row, (key, book) in enumerate(rows):
             for column, field in enumerate(self.columns):
+                if self.cellWidget(row, column) is not None:
+                    self.removeCellWidget(row, column)
                 text = str(book.get(field, ""))
                 if field in ("start_date", "end_date"):
                     text = display_date(text) or "Choose date…"
@@ -188,13 +278,20 @@ class BookSheet(QTableWidget):
                     pixmap = self.image_loader(key, book)
                     if pixmap is not None and not pixmap.isNull():
                         item.setIcon(QIcon(pixmap))
-                        item.setToolTip("Double-click to change cover")
+                        item.setToolTip("Double-click to change cover; right-click for change/remove options")
                     else:
                         item.setText("+ Cover")
                 self.setItem(row, column, item)
+                if field == "rating":
+                    item.setText("")
+                    widget = StarRating(book.get("rating", ""), self)
+                    widget.changed.connect(lambda value, key=key: self.rating_changed.emit(key, value))
+                    self.setCellWidget(row, column, widget)
         for column in range(len(self.columns)):
+            if self.cellWidget(len(rows), column) is not None:
+                self.removeCellWidget(len(rows), column)
             item = QTableWidgetItem("+ Add a new book" if column == 1 else "")
-            item.setToolTip("Click to add a blank book row. Fill in book name and author to save it.")
+            item.setToolTip("Click to add a blank book row. Fill any cell and leave it to save the row automatically.")
             item.setForeground(QColor("#c7d2fe" if self.dark_mode else "#4f46e5"))
             item.setBackground(QColor("#303458" if self.dark_mode else "#eef2ff"))
             item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
@@ -231,7 +328,10 @@ class BookSheet(QTableWidget):
         self.select(key, column)
         self.editor_cell = (key, column)
         self.on_commit = commit
-        if self.columns[column] == "notes":
+        if self.columns[column] == "rating":
+            self.editor = StarRating(value, self.viewport())
+            self.editor.changed.connect(lambda _: self.finish_edit())
+        elif self.columns[column] == "notes":
             self.editor = QPlainTextEdit(self.viewport())
             self.editor.setPlainText(value)
         else:
@@ -240,7 +340,8 @@ class BookSheet(QTableWidget):
         self.position_editor()
         self.editor.show()
         self.editor.setFocus()
-        self.editor.selectAll()
+        if not isinstance(self.editor, (QComboBox, StarRating)):
+            self.editor.selectAll()
 
     def position_editor(self, *_):
         if self.editor and self.editor_cell:
@@ -253,7 +354,10 @@ class BookSheet(QTableWidget):
         if self.editor is None:
             return True
         editor = self.editor
-        value = editor.toPlainText() if isinstance(editor, QPlainTextEdit) else editor.text()
+        if isinstance(editor, (QComboBox, StarRating)):
+            value = editor.currentData()
+        else:
+            value = editor.toPlainText() if isinstance(editor, QPlainTextEdit) else editor.text()
         if not self.on_commit(value):
             editor.setFocus()
             return False
@@ -275,14 +379,25 @@ class BookSheet(QTableWidget):
 
     def move_cell(self, backwards=False):
         row, column = self.currentRow(), self.currentColumn()
-        column += -1 if backwards else 1
-        if column >= len(self.columns):
-            row, column = row + 1, 1
-        elif column < 1:
-            row, column = row - 1, len(self.columns) - 1
-        self.setCurrentCell(max(0, min(self.rowCount() - 1, row)), column)
+        header = self.horizontalHeader()
+        visual = header.visualIndex(column) + (-1 if backwards else 1)
+        if visual >= len(self.columns):
+            row, visual = row + 1, 0
+        elif visual < 0:
+            row, visual = row - 1, len(self.columns) - 1
+        self.setCurrentCell(max(0, min(self.rowCount() - 1, row)), header.logicalIndex(visual))
+
+    def save_after_focus_change(self, editor):
+        if editor is not self.editor or QApplication.activePopupWidget() is not None:
+            return
+        focus = QApplication.focusWidget()
+        if focus is not editor and (focus is None or not editor.isAncestorOf(focus)):
+            self.finish_edit()
 
     def eventFilter(self, watched, event):
+        if watched == self.editor and event.type() == QEvent.Type.FocusOut:
+            editor = watched
+            QTimer.singleShot(0, lambda: self.save_after_focus_change(editor))
         if watched == self.editor and event.type() == QEvent.Type.KeyPress:
             key = event.key()
             if key == Qt.Key.Key_Escape:

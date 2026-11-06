@@ -32,8 +32,16 @@ class Catalogue:
     @staticmethod
     def validate(fields):
         for key, label in (("name", "Book name"), ("author", "Author")):
-            if not isinstance(fields.get(key), str) or not fields[key].strip():
-                raise ValueError(f"{label} is required.")
+            if not isinstance(fields.get(key, ""), str):
+                raise ValueError(f"{label} must be text.")
+        rating = fields.get("rating", "")
+        if rating not in ("", None):
+            try:
+                number = float(rating)
+                if isinstance(rating, bool) or not 1 <= number <= 5 or number * 2 != int(number * 2):
+                    raise ValueError()
+            except (ValueError, TypeError, OverflowError):
+                raise ValueError("Rating must be from 1 to 5 in steps of 0.5.") from None
         dates = {}
         for key, label in (("start_date", "Start date"), ("end_date", "End date")):
             value = fields.get(key, "")
@@ -69,9 +77,13 @@ class Catalogue:
         self.next_serial = next_serial
 
     def save(self, fields, serial=None, image_source=None):
+        self.validate(fields)
+        rating = fields.get("rating", "")
         fields = {key: fields.get(key, "").strip() for key in
                   ("name", "author", "start_date", "end_date", "notes", "image")}
+        fields["rating"] = rating
         self.validate(fields)
+        fields["rating"] = float(rating) if rating not in ("", None) else ""
         if serial is not None and not any(book["serial"] == serial for book in self.books):
             raise ValueError("Book no longer exists.")
         if image_source:
@@ -143,7 +155,9 @@ class Catalogue:
                         book[key] = datetime.strptime(value, "%d-%m-%Y").date().isoformat()
                     except ValueError:
                         raise ValueError(f"Book {index}: invalid date.") from None
+            book["rating"] = entry.get("rating", "")
             self.validate(book)
+            book["rating"] = float(book["rating"]) if book["rating"] not in ("", None) else ""
             payload = None
             extension = entry.get("image_extension", "")
             if "image_data" in entry:
